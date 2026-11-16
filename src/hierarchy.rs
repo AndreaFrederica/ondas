@@ -673,6 +673,7 @@ impl Hierarchy {
     /// For example, `tb.mem[0]` names a whole signal, while `tb.mem[0][7:0]`
     /// can slice it. Use [`Self::signal_path`] followed by [`Signal::slice`] to
     /// avoid ambiguity. This is not an expression language or a dynamic index.
+    /// Use [`Self::resolve_signal`] to retain the selected declaration and explicit slice.
     ///
     /// Returns [`LookupError`] for invalid syntax, missing or ambiguous metadata,
     /// a declaration without a history, or an invalid slice.
@@ -686,18 +687,20 @@ impl Hierarchy {
     /// Uses the exact-first rules of [`Self::signal`]. Exact ambiguous declarations
     /// and declarations without a signal return errors without trying a slice.
     /// Full-width slices retain their bounds in [`ResolvedSelector::projection`].
-    /// Aliases can share a handle while having different declaration metadata.
     ///
     /// `scope` is a root-based component prefix, not a scope identity. An empty
     /// prefix or `None` selects from the root. A candidate that starts with the
     /// prefix and has at least one further component is already qualified.
     /// Otherwise, the prefix is added once. This applies to both the exact path
-    /// and the slice base, without changing quoted or escaped names. Empty paths
-    /// stay empty. There is no search in other scopes and no separate scope lookup;
+    /// and the slice base, without changing quoted or escaped names. An empty
+    /// candidate or slice base is not prefixed and returns [`LookupError::NotFound`]
+    /// with an empty path. There is no search in other scopes and no separate scope lookup;
     /// duplicate scope paths need not make the final declaration ambiguous.
     ///
     /// Returns the same [`LookupError`] categories as [`Self::signal`]. Syntax
     /// error offsets refer to the supplied selector, before qualification.
+    /// Lookup error paths identify the attempted qualified path, or the qualified
+    /// base without bounds when a slice was attempted.
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {

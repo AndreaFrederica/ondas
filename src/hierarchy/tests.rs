@@ -687,6 +687,11 @@ fn interpretation_belongs_to_declarations_not_shared_histories() {
                         .label,
                     name
                 );
+            } else {
+                assert!(matches!(
+                    hierarchy.resolve_signal(&format!("{name}[0:0]"), None),
+                    Err(LookupError::InvalidSlice(SliceError::NotBits))
+                ));
             }
         }
     }

@@ -179,6 +179,8 @@ first looks up an exact variable path, then considers one trailing `[msb:lsb]`
 slice if exact lookup fails. To separate name lookup from slicing, use [`Hierarchy::signal_path`]
 followed by [`Signal::slice`]. Slice indices are normalized value positions,
 not HDL indices.
+Use [`Hierarchy::resolve_signal`] to retain the selected declaration and explicit
+slice bounds, with an optional scope prefix.
 
 ## Choose a query
 

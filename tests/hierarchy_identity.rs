@@ -218,3 +218,49 @@ fn selector_results_preserve_aliases_projection_and_output_roundtrip() {
     );
     assert_eq!(retained.projection(), Some((0, 0)));
 }
+
+#[test]
+fn public_selector_failures_keep_typed_errors_and_qualified_paths() {
+    let wave = ondas::open_bytes("identity.vcd", SOURCE.into()).unwrap();
+    let h = wave.hierarchy();
+    let scope = HierarchyPath::parse("top").unwrap();
+    for (selector, projection) in [("[0]", None), ("[0][0:0]", Some((0, 0)))] {
+        let selected = h.resolve_signal(selector, Some(&scope)).unwrap();
+        assert_eq!(selected.declaration().name(), "[0]");
+        assert_eq!(selected.projection(), projection);
+    }
+    assert!(matches!(
+        h.resolve_signal("duplicate[7:0]", Some(&scope)),
+        Err(LookupError::Ambiguous { path, matches: 2 })
+            if path == HierarchyPath::from_components(["top", "duplicate[7:0]"])
+    ));
+    let forced = h
+        .resolve_signal(r#""duplicate"[7:0]"#, Some(&scope))
+        .unwrap();
+    assert_eq!(forced.declaration().name(), "duplicate");
+    assert_eq!(forced.projection(), Some((7, 0)));
+    assert!(matches!(
+        h.resolve_signal("absent[3:0]", Some(&scope)),
+        Err(LookupError::NotFound { path })
+            if path == HierarchyPath::from_components(["top", "absent"])
+    ));
+    assert!(matches!(
+        h.resolve_signal(r#""literal"[x:0]"#, Some(&scope)),
+        Err(LookupError::InvalidPath(_))
+    ));
+    assert!(matches!(
+        h.resolve_signal(r#""literal"[8:0]"#, Some(&scope)),
+        Err(LookupError::InvalidSlice(ondas::SliceError::OutOfBounds {
+            width: 8,
+            msb: 8,
+            lsb: 0
+        }))
+    ));
+    assert!(matches!(
+        h.resolve_signal(r#""literal"[0:1]"#, Some(&scope)),
+        Err(LookupError::InvalidSlice(ondas::SliceError::InvalidRange {
+            msb: 0,
+            lsb: 1
+        }))
+    ));
+}
