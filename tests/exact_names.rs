@@ -220,6 +220,19 @@ fn common_logical_names(mut wave: Waveform) {
         }
         let signal = declaration.signal().unwrap();
         assert_eq!(signal.width(), Some(width as u32));
+        let whole = hierarchy
+            .resolve_signal(&declaration.path().to_string(), None)
+            .unwrap();
+        assert!(whole.declaration() == declaration);
+        assert_eq!(whole.signal(), signal);
+        assert_eq!(whole.projection(), None);
+        let name = serde_json::to_string(declaration.name()).unwrap();
+        let selector = format!("{name}[{}:0]", width - 1);
+        let parent = declaration.path().parent().unwrap();
+        let full = hierarchy.resolve_signal(&selector, Some(&parent)).unwrap();
+        assert!(full.declaration() == declaration);
+        assert_eq!(full.signal(), signal);
+        assert_eq!(full.projection(), Some((width as u32 - 1, 0)));
         for (tick, expected) in [0, 4, 9].into_iter().zip(values) {
             let Sample::Value {
                 value: Value::Bits(bits),

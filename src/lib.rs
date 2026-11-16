@@ -498,7 +498,7 @@ pub use error::{
 /// Types describing waveform hierarchy and queryable signals.
 pub use hierarchy::{
     BitRange, Direction, Encoding, Enumeration, EnumerationVariant, Hierarchy, HierarchyPath, Item,
-    LogicDomain, Packing, Scope, Signal, Signedness, Variable,
+    LogicDomain, Packing, ResolvedSelector, Scope, Signal, Signedness, Variable,
 };
 /// Owned and borrowed waveform query results.
 pub use query::{Change, Initial, QueryContext, Sample, SampleRef, ScanRef, Selection, Trace};
