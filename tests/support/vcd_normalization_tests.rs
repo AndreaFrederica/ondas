@@ -129,6 +129,56 @@ fn vcd_literal_array_elements_stay_separate() {
     }
 }
 
+#[test]
+#[ignore = "requires installed VCD fixtures; run just conformance"]
+fn vcd_normalized_selector_retains_declaration_and_projection() {
+    for bytes in [false, true] {
+        let mut wave = open("vcd/vcd0109-split-layouts", bytes);
+        let h = wave.hierarchy().clone();
+        let declaration = h.variable("desc").unwrap();
+        let whole = h.resolve_signal("desc", None).unwrap();
+        assert!(whole.declaration() == declaration);
+        assert!(whole.declaration().range().is_none());
+        assert_eq!(whole.projection(), None);
+
+        let full = h.resolve_signal(r#""desc"[3:0]"#, None).unwrap();
+        assert_eq!(full.signal(), whole.signal());
+        assert_eq!(full.projection(), Some((3, 0)));
+        assert!(full.declaration() == declaration);
+
+        let low = h.resolve_signal(r#""desc"[1:0]"#, None).unwrap();
+        assert_eq!(low.signal(), whole.signal().slice(1, 0).unwrap());
+        assert_eq!(low.projection(), Some((1, 0)));
+        assert!(low.declaration() == declaration);
+        assert_sample(
+            wave.sample(low.signal(), ondas::Time::from_ticks(5))
+                .unwrap()
+                .as_ref(),
+            5,
+            LOW,
+        );
+
+        let scope = HierarchyPath::from_components(["aliases"]);
+        let alias = h.resolve_signal(r#""bus"[1:0]"#, Some(&scope)).unwrap();
+        assert_eq!(alias.signal(), low.signal());
+        assert_eq!(alias.projection(), Some((1, 0)));
+        assert!(alias.declaration() == h.variable("aliases.bus").unwrap());
+        assert!(alias.declaration() != declaration);
+        assert!(alias.declaration().range().is_none());
+
+        let literal = h
+            .resolve_signal(r#"negative_cases."literal[3:2]""#, None)
+            .unwrap();
+        assert_eq!(literal.declaration().name(), "literal[3:2]");
+        assert_eq!(literal.projection(), None);
+        assert_eq!(literal.signal(), h.signal("high_alias").unwrap());
+        assert!(matches!(
+            h.resolve_signal("negative_cases.gap", None),
+            Err(ondas::LookupError::Ambiguous { matches: 2, .. })
+        ));
+    }
+}
+
 // These completed-tick histories come from the authored source record table.
 const BUS: &[(u64, &str)] = &[
     (5, "10xx"),

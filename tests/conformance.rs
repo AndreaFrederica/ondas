@@ -2513,10 +2513,16 @@ fn fst_enum_keys_match_recorded_values_and_allow_unlabelled_bits() {
                 .variables()
                 .find(|v| v.name() == variable_name)
                 .unwrap();
+            let selected = hierarchy
+                .resolve_signal(&variable.path().to_string(), None)
+                .unwrap();
+            assert!(selected.declaration() == variable);
+            assert_eq!(selected.projection(), None);
             let signal = variable.signal().unwrap();
-            assert_eq!(variable.signedness(), None);
-            assert_eq!(variable.logic_domain(), Some(domain));
-            let table = variable.enumeration().unwrap();
+            assert_eq!(selected.signal(), signal);
+            assert_eq!(selected.declaration().signedness(), None);
+            assert_eq!(selected.declaration().logic_domain(), Some(domain));
+            let table = selected.declaration().enumeration().unwrap();
             for variant in table.variants() {
                 assert_eq!(variant.encoded.width(), signal.width().unwrap());
             }

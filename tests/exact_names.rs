@@ -220,6 +220,39 @@ fn common_logical_names(mut wave: Waveform) {
         }
         let signal = declaration.signal().unwrap();
         assert_eq!(signal.width(), Some(width as u32));
+        let whole = hierarchy
+            .resolve_signal(&declaration.path().to_string(), None)
+            .unwrap();
+        assert!(whole.declaration() == declaration);
+        assert_eq!(whole.signal(), signal);
+        assert_eq!(whole.projection(), None);
+        let name = serde_json::to_string(declaration.name()).unwrap();
+        let selector = format!("{name}[{}:0]", width - 1);
+        let parent = declaration.path().parent().unwrap();
+        let full = hierarchy.resolve_signal(&selector, Some(&parent)).unwrap();
+        assert!(full.declaration() == declaration);
+        assert_eq!(full.signal(), signal);
+        assert_eq!(full.projection(), Some((width as u32 - 1, 0)));
+        let qualified = hierarchy
+            .resolve_signal(&format!("{parent}.{selector}"), Some(&parent))
+            .unwrap();
+        assert!(qualified.declaration() == full.declaration());
+        assert_eq!(qualified.signal(), full.signal());
+        assert_eq!(qualified.projection(), full.projection());
+        assert_eq!(full.declaration().signedness(), declaration.signedness());
+        assert_eq!(
+            full.declaration().logic_domain(),
+            declaration.logic_domain()
+        );
+        if declaration.name() == "leaf[0]" {
+            // An indexed literal base followed by a range, as in mem[0][7:0].
+            let indexed = hierarchy
+                .resolve_signal("leaf[0][7:0]", Some(&parent))
+                .unwrap();
+            assert!(indexed.declaration() == declaration);
+            assert_eq!(indexed.projection(), Some((7, 0)));
+            assert_eq!(indexed.signal(), signal);
+        }
         for (tick, expected) in [0, 4, 9].into_iter().zip(values) {
             let Sample::Value {
                 value: Value::Bits(bits),

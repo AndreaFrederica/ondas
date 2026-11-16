@@ -179,6 +179,8 @@ first looks up an exact variable path, then considers one trailing `[msb:lsb]`
 slice if exact lookup fails. To separate name lookup from slicing, use [`Hierarchy::signal_path`]
 followed by [`Signal::slice`]. Slice indices are normalized value positions,
 not HDL indices.
+Use [`Hierarchy::resolve_signal`] to retain the selected declaration and explicit
+slice bounds, with an optional scope prefix.
 
 ## Choose a query
 
@@ -511,7 +513,7 @@ pub use error::{
 /// Types describing waveform hierarchy and queryable signals.
 pub use hierarchy::{
     BitRange, Direction, Encoding, Enumeration, EnumerationVariant, Hierarchy, HierarchyPath, Item,
-    LogicDomain, Packing, Scope, Signal, Signedness, Variable,
+    LogicDomain, Packing, ResolvedSelector, Scope, Signal, Signedness, Variable,
 };
 /// Owned and borrowed waveform query results.
 pub use query::{Change, Initial, QueryContext, Sample, SampleRef, ScanRef, Selection, Trace};
