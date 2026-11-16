@@ -263,6 +263,19 @@ values, source bytes or query state, and other inputs retain no index.
   including NUL and padding. Non-ASCII values return [`Error::NonAsciiString`].
   A real declaration with string records is
   classified as string storage before signal handles are returned.
+- Split declarations with one exact name and owning scope form one variable
+  when every part has a valid bit range, compatible kind, direction, constancy
+  and name escaping, and their ranges cover one span without gaps or overlaps.
+  The parts need not be adjacent or ordered in the header. Multi-bit ranges
+  must agree on direction; scalar-only groups use higher-index-first order.
+  Scalar parts do not establish the original HDL direction.
+  Other groups keep their declarations and ordinary lookup ambiguity. Literal
+  attached brackets and escaped names are interpreted only by the VCD parser.
+  Independent aliases remain public. Values use the same availability and
+  projection rules as [`Waveform::concat`], without retaining full histories.
+  Separate groups with the same ordered source histories share a whole handle.
+  The normalized variable has no original HDL declaration range: its
+  [`Variable::range`] is `None`. Width and slices use normalized positions.
 - Persistent dump-block records apply at their recorded tick. Event records in
   `$dumpvars`, `$dumpall`, `$dumpoff` and `$dumpon` are snapshots, not occurrences.
   Mixed checkpoint/event ticks do not establish physical multiplicity. Resume

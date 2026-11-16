@@ -306,7 +306,7 @@ fn open_input(
         (_, None) => return Err(Error::NoBackend { format }),
     };
     Ok(Waveform {
-        compositions: composition::Compositions::default(),
+        compositions: composition::Compositions::imported(&hierarchy),
         reader,
         hierarchy,
         metadata,

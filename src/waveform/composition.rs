@@ -14,6 +14,19 @@ pub(super) struct Compositions {
     indices: HashMap<Arc<[Signal]>, usize>,
 }
 
+impl Compositions {
+    pub(super) fn imported(hierarchy: &Hierarchy) -> Self {
+        let mut registry = Self::default();
+        for (width, parts) in hierarchy.imported_compositions() {
+            let index = registry.definitions.len();
+            let parts = Arc::<[Signal]>::from(parts);
+            registry.indices.insert(parts.clone(), index);
+            registry.definitions.push(Definition { parts, width });
+        }
+        registry
+    }
+}
+
 impl Waveform {
     /// Creates a static bit composition in most-significant-part-first order.
     ///
@@ -22,6 +35,8 @@ impl Waveform {
     /// retain their internal bit order. The total width must fit in u32. Order
     /// alone sets contiguous result positions, with no holes or overlaps.
     /// Repeated parts retain each placement. No source declaration is created.
+    /// Reusing an imported VCD definition returns its existing handle and
+    /// preserves the declarations listed by [`Hierarchy::aliases`].
     ///
     /// If any part has an observed value, its bits are retained and Missing
     /// parts are filled with X. An observed all-X value counts as observed.
@@ -128,6 +143,63 @@ impl Waveform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_projection_keeps_operand_errors_and_stop_semantics() {
+        use std::ops::ControlFlow;
+        let encodings = vec![Encoding::Bits { width: 1 }; 2];
+        let hierarchy = Hierarchy::with_compositions(
+            vec![],
+            vec![],
+            encodings.clone(),
+            vec![vec![0, 1].into_boxed_slice()],
+        );
+        let bit =
+            |text: &str| crate::Value::Bits(crate::Bits::from_ascii(text.as_bytes()).unwrap());
+        let mut wave = Waveform::memory(
+            encodings,
+            vec![
+                (0, 0, bit("0")),
+                (1, 0, bit("1")),
+                (0, 2, bit("1")),
+                (1, 2, bit("0")),
+            ],
+            Some(3),
+        );
+        wave.compositions = Compositions::imported(&hierarchy);
+        wave.hierarchy = hierarchy;
+        let selected = wave.hierarchy.computed_signal(0, 2).slice(1, 1).unwrap();
+        let Reader::Memory { failure, .. } = &mut wave.reader else {
+            unreachable!()
+        };
+        *failure = Some(|| std::io::Error::from_raw_os_error(13).into());
+        assert!(wave.sample(selected, Time::ZERO).is_ok());
+        assert!(
+            matches!(wave.sample(selected, Time::from_ticks(2)), Err(Error::Io(cause)) if cause.raw_os_error() == Some(13))
+        );
+        assert!(
+            matches!(wave.samples_at(&[selected, selected], &[Time::ZERO, Time::from_ticks(2)]), Err(Error::Io(cause)) if cause.raw_os_error() == Some(13))
+        );
+        assert!(
+            matches!(wave.trace(selected, crate::TimeRange::all()), Err(Error::Io(cause)) if cause.raw_os_error() == Some(13))
+        );
+        assert!(matches!(
+            wave.select(&[selected]).unwrap().query(crate::TimeRange::all(), &[0], |_| {
+                Ok(ControlFlow::<()>::Continue(()))
+            }),
+            Err(Error::Io(cause)) if cause.raw_os_error() == Some(13)
+        ));
+        let mut visits = 0;
+        assert_eq!(
+            wave.scan(&[selected], crate::TimeRange::all(), |_| {
+                visits += 1;
+                ControlFlow::Break(7)
+            })
+            .unwrap(),
+            ControlFlow::Break(7)
+        );
+        assert_eq!(visits, 1);
+    }
 
     #[test]
     fn construction_is_checked_before_registration() {

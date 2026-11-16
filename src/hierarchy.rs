@@ -185,6 +185,8 @@ impl fmt::Display for HierarchyPath {
 /// Declarations and histories are distinct. [`Self::variables`] includes aliases.
 /// [`Self::signals`] lists whole histories with distinct handles. A reader can
 /// leave aliases separate when it cannot establish their shared history.
+/// VCD split declarations can form one normalized variable and signal. Their
+/// private operand histories are not listed unless another declaration uses them.
 /// Lookup failures use [`LookupError`], not opening or backend errors.
 ///
 /// Scope and variable equality compares object identity, not paths or metadata.
@@ -273,6 +275,9 @@ struct HierarchyData {
     scopes: Vec<ScopeData>,
     variables: Vec<VariableData>,
     encodings: Vec<Encoding>,
+    // Imported definitions follow reader encodings. Their operands are reader indices.
+    compositions: Vec<Box<[usize]>>,
+    public_signals: Option<Vec<usize>>,
     children: OnceLock<ChildLinks>,
     declarations_by_name: OnceLock<NameIndex>,
 }
@@ -421,7 +426,9 @@ impl Eq for Variable<'_> {}
 ///
 /// [`Waveform::concat`](crate::Waveform::concat) creates computed bit signals.
 /// Identical ordered definitions in one waveform share a handle. A computed
-/// signal has no source declaration. Its definition belongs to the waveform;
+/// definition does not create declarations. Imported VCD definitions can have
+/// normalized declarations, also when `concat` reuses their handles. The
+/// definition belongs to the waveform;
 /// copying a handle does not keep that waveform alive.
 ///
 /// A projection has its own observed history. Only changes to the selected bits
@@ -445,12 +452,51 @@ impl Hierarchy {
         variables: Vec<VariableData>,
         encodings: Vec<Encoding>,
     ) -> Self {
+        Self::with_compositions(scopes, variables, encodings, Vec::new())
+    }
+
+    pub(crate) fn with_compositions(
+        scopes: Vec<ScopeData>,
+        variables: Vec<VariableData>,
+        mut encodings: Vec<Encoding>,
+        compositions: Vec<Box<[usize]>>,
+    ) -> Self {
+        let public_signals = if compositions.is_empty() {
+            None
+        } else {
+            for parts in &compositions {
+                let width = parts
+                    .iter()
+                    .map(|&part| match encodings[part] {
+                        Encoding::Bits { width } => width,
+                        _ => unreachable!("validated bit composition"),
+                    })
+                    .try_fold(0u32, u32::checked_add)
+                    .expect("validated composition width");
+                encodings.push(Encoding::Bits { width });
+            }
+            let mut visible = vec![false; encodings.len()];
+            for variable in &variables {
+                if let Some(index) = variable.signal {
+                    visible[index] = true;
+                }
+            }
+            Some(
+                visible
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, visible)| visible.then_some(index))
+                    .collect(),
+            )
+        };
         Self {
             source: next_source(),
             data: Arc::new(HierarchyData {
                 scopes,
                 variables,
                 encodings,
+                compositions,
+                public_signals,
                 children: OnceLock::new(),
                 declarations_by_name: OnceLock::new(),
             }),
@@ -506,6 +552,13 @@ impl Hierarchy {
             }
         }
         bytes = bytes.saturating_add(vec_bytes::<Encoding>(data.encodings.capacity()));
+        bytes = bytes.saturating_add(vec_bytes::<Box<[usize]>>(data.compositions.capacity()));
+        for parts in &data.compositions {
+            bytes = bytes.saturating_add(vec_bytes::<usize>(parts.len()));
+        }
+        if let Some(signals) = &data.public_signals {
+            bytes = bytes.saturating_add(vec_bytes::<usize>(signals.capacity()));
+        }
         // Children links keep one entry per scope and one per declaration; the name index keeps
         // one offset per scope plus two, and one declaration index per declaration.
         let child_entries = scopes.saturating_mul(2).saturating_add(variables);
@@ -530,6 +583,13 @@ impl Hierarchy {
 
     pub(crate) fn signal_at(&self, index: usize) -> Signal {
         let encoding = self.data.encodings[index];
+        let sources = self.data.encodings.len() - self.data.compositions.len();
+        if index >= sources {
+            let Encoding::Bits { width } = encoding else {
+                unreachable!()
+            };
+            return self.computed_signal(index - sources, width);
+        }
         Signal {
             source: self.source,
             index,
@@ -540,8 +600,27 @@ impl Hierarchy {
         }
     }
 
+    pub(crate) fn imported_compositions(&self) -> impl Iterator<Item = (u32, Vec<Signal>)> + '_ {
+        let sources = self.data.encodings.len() - self.data.compositions.len();
+        self.data
+            .compositions
+            .iter()
+            .enumerate()
+            .map(move |(index, parts)| {
+                let width = self
+                    .signal_at(sources + index)
+                    .width()
+                    .expect("imported bits");
+                (
+                    width,
+                    parts.iter().map(|&index| self.signal_at(index)).collect(),
+                )
+            })
+    }
+
     pub(crate) fn validate(&self, signal: Signal) -> Result<usize> {
-        let encoding = (!signal.computed)
+        let sources = self.data.encodings.len() - self.data.compositions.len();
+        let encoding = (!signal.computed && signal.index < sources)
             .then(|| self.data.encodings.get(signal.index).copied())
             .flatten();
         self.validate_encoding(signal, encoding)
@@ -649,8 +728,22 @@ impl Hierarchy {
     /// Iterates over whole signals with distinct handles in the hierarchy.
     ///
     /// Aliases share a handle only when the reader establishes their shared history.
+    /// Private operands of normalized VCD signals are omitted unless they have
+    /// a separate public declaration.
     pub fn signals(&self) -> impl Iterator<Item = Signal> + '_ {
-        (0..self.data.encodings.len()).map(|index| self.signal_at(index))
+        let count = self
+            .data
+            .public_signals
+            .as_ref()
+            .map_or(self.data.encodings.len(), Vec::len);
+        (0..count).map(|index| {
+            let slot = self
+                .data
+                .public_signals
+                .as_ref()
+                .map_or(index, |signals| signals[index]);
+            self.signal_at(slot)
+        })
     }
 
     /// Parses and resolves an exact scope path.
@@ -934,8 +1027,9 @@ impl Hierarchy {
     /// sliced, and repeatedly sliced handles with the same base return the same
     /// declarations. They retain their original metadata and declaration ranges.
     ///
-    /// Computed signals and their slices have no source declarations, so their
-    /// iterator is empty. They do not inherit aliases from their operands.
+    /// Imported VCD compositions have their normalized declarations. A computed
+    /// definition without declarations returns an empty iterator. Compositions
+    /// do not inherit aliases from their operands.
     ///
     /// A handle from another hierarchy or waveform produces
     /// [`Error::InvalidSignal`](crate::Error::InvalidSignal).
@@ -943,14 +1037,12 @@ impl Hierarchy {
         if signal.computed {
             self.validate_encoding(signal, Some(signal.base_encoding))?;
         }
-        let index = if signal.computed {
-            None
-        } else {
-            Some(self.validate(signal)?)
-        };
+        if !signal.computed {
+            self.validate(signal)?;
+        }
         Ok(self
             .variables()
-            .filter(move |variable| index.is_some() && variable.data().signal == index))
+            .filter(move |variable| variable.signal() == Some(signal.base())))
     }
 }
 
@@ -1114,6 +1206,10 @@ impl<'h> Variable<'h> {
     }
 
     /// Returns the original HDL declaration range, if present.
+    ///
+    /// A normalized VCD split group returns `None`: its recorded coverage does
+    /// not establish the original whole HDL range. Use [`Signal::width`] and
+    /// [`Signal::slice`] for normalized positions.
     pub fn range(&self) -> Option<BitRange> {
         self.data().range
     }
