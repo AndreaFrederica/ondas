@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use crate::{Encoding, hierarchy::VariableData};
 
+/// Returns declarations and unique MSB-first recipes over reader encoding indices.
+/// A normalized declaration uses slot `encodings.len() + recipe_index`.
 pub(super) fn normalize(
     mut variables: Vec<VariableData>,
     encodings: &[Encoding],
@@ -59,14 +61,9 @@ fn groups(variables: &[VariableData], encodings: &[Encoding]) -> Vec<Vec<usize>>
             let mut total = 0u32;
             for &index in &members {
                 let variable = &variables[index];
+                // VCD has implicit direction and no type metadata. Kind determines constancy.
                 if variable.kind != first.kind
-                    || variable.direction != first.direction
-                    || variable.is_constant != first.is_constant
                     || variable.name_was_escaped != first.name_was_escaped
-                    || variable.type_name != first.type_name
-                    || variable.signedness != first.signedness
-                    || variable.logic_domain != first.logic_domain
-                    || variable.enumeration.is_some()
                 {
                     return None;
                 }

@@ -561,11 +561,22 @@ impl Hierarchy {
         }
     }
 
-    pub(crate) fn imported_compositions(&self) -> impl Iterator<Item = Vec<Signal>> + '_ {
+    pub(crate) fn imported_compositions(&self) -> impl Iterator<Item = (u32, Vec<Signal>)> + '_ {
+        let sources = self.data.encodings.len() - self.data.compositions.len();
         self.data
             .compositions
             .iter()
-            .map(|parts| parts.iter().map(|&index| self.signal_at(index)).collect())
+            .enumerate()
+            .map(move |(index, parts)| {
+                let width = self
+                    .signal_at(sources + index)
+                    .width()
+                    .expect("imported bits");
+                (
+                    width,
+                    parts.iter().map(|&index| self.signal_at(index)).collect(),
+                )
+            })
     }
 
     pub(crate) fn validate(&self, signal: Signal) -> Result<usize> {

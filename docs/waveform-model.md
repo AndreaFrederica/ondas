@@ -20,7 +20,7 @@ Unknown metadata stays absent. A conventional time unit in an external oracle do
 
 A composition with one observed part fills its Missing parts with X. A composition with no observed parts stays Missing. A result slice depends on this rule. Suppose `hi` is Missing and `lo` is observed. The upper slice of their concatenation is observed X, but a direct `hi` read is Missing. Moving a projection inside a concatenation can therefore change the result. Preserve this dependency in nested definitions.
 
-The latest timestamp of a part does not determine the computed change time. The engine must compare completed assembled states. A narrow result can require wide or deeply nested operands. The result width alone therefore does not bound working state. Automatic assembly needs proven membership and bit mapping. Adjacent names or ranges are insufficient.
+The latest timestamp of a part does not determine the computed change time. The engine must compare completed assembled states. A narrow result can require wide or deeply nested operands. The result width alone therefore does not bound working state. Automatic assembly needs proven membership and bit mapping. VCD uses parser-established ranges, owning scope identity and compatible declaration metadata to establish this relationship; `vcd-reader.md` explains the rule. Adjacency alone is insufficient.
 
 ## Query boundaries are not decoder boundaries
 

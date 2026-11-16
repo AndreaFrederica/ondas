@@ -186,6 +186,11 @@ fn vcd_split_layouts_metadata_identity_and_rejections() {
         let mut wave = open("vcd/vcd0109-split-layouts", bytes);
         let h = wave.hierarchy().clone();
         let bus = h.signal("desc").unwrap();
+        // The negative-index scalar group declares its lowest index first.
+        assert_eq!(
+            h.signal("bits").unwrap(),
+            h.signal("negative_bits").unwrap()
+        );
         let alias_paths = ["desc", "desc_ordered", "asc", "negative", "aliases.bus"];
         for path in alias_paths {
             let variable = h.variable(path).unwrap();

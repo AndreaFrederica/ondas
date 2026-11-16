@@ -17,11 +17,7 @@ pub(super) struct Compositions {
 impl Compositions {
     pub(super) fn imported(hierarchy: &Hierarchy) -> Self {
         let mut registry = Self::default();
-        for parts in hierarchy.imported_compositions() {
-            let width = parts
-                .iter()
-                .map(|part| part.width().expect("bit operand"))
-                .sum();
+        for (width, parts) in hierarchy.imported_compositions() {
             let index = registry.definitions.len();
             let parts = Arc::<[Signal]>::from(parts);
             registry.indices.insert(parts.clone(), index);
@@ -39,6 +35,8 @@ impl Waveform {
     /// retain their internal bit order. The total width must fit in u32. Order
     /// alone sets contiguous result positions, with no holes or overlaps.
     /// Repeated parts retain each placement. No source declaration is created.
+    /// Reusing an imported VCD definition returns its existing handle and
+    /// preserves the declarations listed by [`Hierarchy::aliases`].
     ///
     /// If any part has an observed value, its bits are retained and Missing
     /// parts are filled with X. An observed all-X value counts as observed.
