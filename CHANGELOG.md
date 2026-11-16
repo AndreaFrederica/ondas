@@ -4,6 +4,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Changed
+
+- Normalize confirmed VCD split declarations as one variable and signal. Preserve independent aliases and use ordinary composition semantics for values and slices. The normalized variable has no original HDL declaration range.
+
 ## [2.1.0] - 2026-11-10
 
 ### Added

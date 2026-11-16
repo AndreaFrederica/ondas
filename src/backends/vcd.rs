@@ -6,6 +6,8 @@ use std::{
     sync::Arc,
 };
 
+mod normalize;
+
 #[cfg(unix)]
 use std::{
     cell::RefCell,
@@ -633,7 +635,9 @@ impl Reader {
             )?;
             span
         };
-        let hierarchy = Hierarchy::new(scopes, variables, reader.encodings.clone());
+        let (variables, compositions) = normalize::normalize(variables, &reader.encodings);
+        let hierarchy =
+            Hierarchy::with_compositions(scopes, variables, reader.encodings.clone(), compositions);
         Ok((reader, hierarchy, metadata))
     }
 
