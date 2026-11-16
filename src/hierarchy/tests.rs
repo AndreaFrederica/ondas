@@ -484,6 +484,18 @@ fn unique_lookup_and_branching_duplicates_preserve_outcomes() {
     let path = HierarchyPath::from_components(["branch", "target"]);
     let found = one_branch.variable_path(&path).unwrap();
     assert_eq!(found.parent().unwrap().name(), "branch");
+    let scope = HierarchyPath::from_components(["branch"]);
+    assert!(matches!(
+        one_branch.scope_path(&scope),
+        Err(LookupError::Ambiguous { .. })
+    ));
+    assert!(
+        one_branch
+            .resolve_signal("target", Some(&scope))
+            .unwrap()
+            .declaration()
+            == found
+    );
 
     // The same path with the target under both branches is ambiguous.
     let mut data = Arc::try_unwrap(fixture().data).ok().unwrap();
@@ -625,7 +637,14 @@ fn interpretation_belongs_to_declarations_not_shared_histories() {
                 type_name: None,
                 signedness,
                 logic_domain,
-                enumeration: None,
+                enumeration: (signal == Some(0)).then(|| {
+                    EnumerationData::for_encoding(
+                        Some(name.into()),
+                        vec![("00000000".into(), name.into())],
+                        Encoding::Bits { width: 8 },
+                    )
+                    .unwrap()
+                }),
                 signal,
             })
             .collect(),
@@ -644,6 +663,37 @@ fn interpretation_belongs_to_declarations_not_shared_histories() {
             variable.signal(),
             signal.map(|index| hierarchy.signal_at(index))
         );
+        if let Some(signal) = variable.signal() {
+            let whole = hierarchy.resolve_signal(name, None).unwrap();
+            assert!(whole.declaration() == variable);
+            assert_eq!(whole.signal(), signal);
+            assert_eq!(whole.projection(), None);
+            if signal.width() == Some(8) {
+                let full = hierarchy
+                    .resolve_signal(&format!("{name}[7:0]"), None)
+                    .unwrap();
+                assert!(full.declaration() == variable);
+                assert_eq!(full.signal(), whole.signal());
+                assert_eq!(full.projection(), Some((7, 0)));
+                assert_eq!(full.declaration().signedness(), signedness);
+                assert_eq!(full.declaration().logic_domain(), logic_domain);
+                assert_eq!(
+                    full.declaration()
+                        .enumeration()
+                        .unwrap()
+                        .variants()
+                        .next()
+                        .unwrap()
+                        .label,
+                    name
+                );
+            } else {
+                assert!(matches!(
+                    hierarchy.resolve_signal(&format!("{name}[0:0]"), None),
+                    Err(LookupError::InvalidSlice(SliceError::NotBits))
+                ));
+            }
+        }
     }
     let signal = hierarchy.signal("signed").unwrap();
     assert_eq!(signal, hierarchy.signal("unsigned_alias").unwrap());
@@ -720,6 +770,175 @@ fn exact_lookup_precedes_selectors() {
             matches!(hierarchy.signal(text), Err(LookupError::InvalidPath(_))),
             "{text}"
         );
+    }
+}
+
+#[test]
+fn resolved_selectors_keep_paths_and_explicit_normalized_projections() {
+    let h = fixture();
+    for (selector, name, projection, width) in [
+        ("tb.dut.data", "data", None, 32),
+        ("tb.dut.data[31:0]", "data", Some((31, 0)), 32),
+        ("tb.dut.alias[31:0]", "alias", Some((31, 0)), 32),
+        ("tb.dut.data[7:0]", "data[7:0]", None, 8),
+        (r#"tb.dut."data[7:0]""#, "data[7:0]", None, 8),
+        (r#"tb.dut."data"[7:0]"#, "data", Some((7, 0)), 8),
+        ("tb.dut.mem[0]", "mem[0]", None, 32),
+        ("tb.dut.mem[0][7:0]", "mem[0]", Some((7, 0)), 8),
+        (r#"tb.dut."with space"[0:0]"#, "with space", Some((0, 0)), 1),
+    ] {
+        let resolved = h.resolve_signal(selector, None).unwrap();
+        assert_eq!(resolved.declaration().name(), name, "{selector}");
+        assert!(
+            resolved.declaration()
+                == h.variable_path(&HierarchyPath::from_components(["tb", "dut", name]))
+                    .unwrap()
+        );
+        assert_eq!(resolved.projection(), projection, "{selector}");
+        assert_eq!(resolved.signal().width(), Some(width));
+        assert_eq!(resolved.signal(), h.signal(selector).unwrap());
+        // The HDL range is unrelated to the normalized selector bounds.
+        assert_eq!(resolved.declaration().range(), Some(BitRange::new(-16, 15)));
+    }
+    let selections: Vec<_> = ["tb.dut.data", "tb.dut.alias[31:0]", "tb.dut.data"]
+        .into_iter()
+        .map(|text| h.resolve_signal(text, None).unwrap())
+        .collect();
+    assert_eq!(
+        selections
+            .iter()
+            .map(|r| r.declaration().name())
+            .collect::<Vec<_>>(),
+        ["data", "alias", "data"]
+    );
+    assert!(
+        selections
+            .iter()
+            .all(|r| r.signal() == selections[0].signal())
+    );
+    assert_eq!(selections[1].projection(), Some((31, 0)));
+}
+
+#[test]
+fn scoped_selectors_preserve_syntax_and_component_prefixes() {
+    let h = fixture();
+    let scope = HierarchyPath::parse(r#""tb".\dut "#).unwrap();
+    for (relative, absolute) in [
+        ("data", "tb.dut.data"),
+        ("data[7:0]", "tb.dut.data[7:0]"),
+        (r#""data"[7:0]"#, r#"tb.dut."data"[7:0]"#),
+        ("data[15:8]", "tb.dut.data[15:8]"),
+        ("mem[0][7:0]", "tb.dut.mem[0][7:0]"),
+        (r#"\data [15:8]"#, "tb.dut.data[15:8]"),
+    ] {
+        let expected = h.resolve_signal(absolute, None).unwrap();
+        for text in [relative, absolute] {
+            let actual = h.resolve_signal(text, Some(&scope)).unwrap();
+            assert!(actual.declaration() == expected.declaration(), "{text}");
+            assert_eq!(actual.signal(), expected.signal(), "{text}");
+            assert_eq!(actual.projection(), expected.projection(), "{text}");
+        }
+    }
+    let empty = HierarchyPath::from_components([] as [&str; 0]);
+    assert_eq!(
+        h.resolve_signal("tb.dut.data", Some(&empty))
+            .unwrap()
+            .signal(),
+        h.signal("tb.dut.data").unwrap()
+    );
+    for text in ["tb2.data", "dut.data", "tb.dut", r#""tb.dut".data"#] {
+        let Err(LookupError::NotFound { path }) = h.resolve_signal(text, Some(&scope)) else {
+            panic!("{text} must remain relative to the selected prefix");
+        };
+        let wanted = HierarchyPath::from_components(
+            scope
+                .components()
+                .chain(HierarchyPath::parse(text).unwrap().components()),
+        );
+        assert_eq!(path, wanted);
+    }
+    let invalid = r#""data"[x:0]"#;
+    for scope in [None, Some(&scope)] {
+        assert!(matches!(
+            h.resolve_signal(invalid, scope),
+            Err(LookupError::InvalidPath(PathError { offset: 7, .. }))
+        ));
+    }
+}
+
+#[test]
+fn scoped_empty_paths_cannot_select_the_prefix_declaration() {
+    let mut data = Arc::try_unwrap(fixture().data).ok().unwrap();
+    data.variables[0].name = "tb".into();
+    data.variables[0].parent = None;
+    let h = Hierarchy::new(data.scopes, data.variables, data.encodings);
+    let scope = HierarchyPath::from_components(["tb"]);
+    assert!(h.variable("tb").is_ok());
+    assert!(h.scope("tb").is_ok());
+    for text in ["", "[3:0]"] {
+        assert!(
+            matches!(h.resolve_signal(text, Some(&scope)), Err(LookupError::NotFound { path }) if path.is_empty())
+        );
+    }
+    let mut data = Arc::try_unwrap(h.data).ok().unwrap();
+    data.variables[1].name = "[3:0]".into();
+    data.variables[1].parent = Some(0);
+    let h = Hierarchy::new(data.scopes, data.variables, data.encodings);
+    let literal = h.resolve_signal("[3:0]", Some(&scope)).unwrap();
+    assert_eq!(
+        literal.declaration().path(),
+        HierarchyPath::from_components(["tb", "[3:0]"])
+    );
+    assert_eq!(literal.projection(), None);
+}
+
+#[test]
+fn resolved_selector_errors_keep_exact_first_precedence() {
+    for ambiguous in [false, true] {
+        let mut data = Arc::try_unwrap(fixture().data).ok().unwrap();
+        if ambiguous {
+            data.variables[5].name = "data[7:0]".into();
+        } else {
+            data.variables[2].signal = None;
+        }
+        let h = Hierarchy::new(data.scopes, data.variables, data.encodings);
+        let scope = HierarchyPath::parse("tb.dut").unwrap();
+        let error = h.resolve_signal("data[7:0]", Some(&scope)).err().unwrap();
+        if ambiguous {
+            assert!(matches!(error, LookupError::Ambiguous { matches: 2, .. }));
+        } else {
+            assert!(matches!(error, LookupError::NoSignal { .. }));
+        }
+        assert_eq!(
+            h.signal("tb.dut.data[7:0]").unwrap_err().to_string(),
+            error.to_string()
+        );
+        assert_eq!(
+            h.resolve_signal(r#""data"[7:0]"#, Some(&scope))
+                .unwrap()
+                .projection(),
+            Some((7, 0))
+        );
+    }
+    let h = fixture();
+    for (text, expected) in [
+        (
+            "tb.dut.data[32:0]",
+            SliceError::OutOfBounds {
+                width: 32,
+                msb: 32,
+                lsb: 0,
+            },
+        ),
+        (
+            "tb.dut.data[0:1]",
+            SliceError::InvalidRange { msb: 0, lsb: 1 },
+        ),
+    ] {
+        let Err(LookupError::InvalidSlice(error)) = h.resolve_signal(text, None) else {
+            panic!("{text}");
+        };
+        assert_eq!(error.to_string(), expected.to_string());
     }
 }
 

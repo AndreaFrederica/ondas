@@ -54,7 +54,7 @@ use crate::{LookupError, PathError, PathFormatError, Result, SliceError};
 /// # Path versus selector
 ///
 /// Brackets do not specify array indices or bit slices here. `tb.mem[0]` may name
-/// an actual declaration. Only [`Hierarchy::signal`] interprets an optional
+/// an actual declaration. [`Hierarchy::signal`] and [`Hierarchy::resolve_signal`] interpret an optional
 /// trailing `[msb:lsb]` as a projection after exact lookup fails.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HierarchyPath {
@@ -352,6 +352,45 @@ pub struct Variable<'h> {
     index: usize,
 }
 
+/// A selected declaration, its query handle, and an optional explicit bit slice.
+///
+/// The declaration preserves the selected alias and its original metadata.
+/// Equal signal handles do not imply equal declarations or equal projections.
+/// This view borrows only the hierarchy, not the selector text or scope path.
+pub struct ResolvedSelector<'h> {
+    declaration: Variable<'h>,
+    signal: Signal,
+    projection: Option<(u32, u32)>,
+}
+
+impl<'h> ResolvedSelector<'h> {
+    /// Returns the selected declaration, including its original metadata.
+    ///
+    /// A projection does not change the declaration's signedness, logic domain,
+    /// enumeration or HDL range. The caller chooses how to interpret projected bits.
+    pub fn declaration(&self) -> Variable<'h> {
+        Variable {
+            hierarchy: self.declaration.hierarchy,
+            index: self.declaration.index,
+        }
+    }
+
+    /// Returns the resolved query handle, with the requested slice applied.
+    pub fn signal(&self) -> Signal {
+        self.signal
+    }
+
+    /// Returns the explicit inclusive normalized `(msb, lsb)` slice, if selected.
+    ///
+    /// Position zero is the rightmost, least-significant bit of the whole signal.
+    /// These are not HDL indices from [`Variable::range`]. A full-width slice
+    /// still returns `Some`, even when its handle equals the whole signal.
+    /// An exact declaration, including a literal name such as `data[7:0]`, returns `None`.
+    pub fn projection(&self) -> Option<(u32, u32)> {
+        self.projection
+    }
+}
+
 impl PartialEq<Scope<'_>> for Scope<'_> {
     fn eq(&self, other: &Scope<'_>) -> bool {
         self.hierarchy.source == other.hierarchy.source && self.index == other.index
@@ -634,13 +673,81 @@ impl Hierarchy {
     /// For example, `tb.mem[0]` names a whole signal, while `tb.mem[0][7:0]`
     /// can slice it. Use [`Self::signal_path`] followed by [`Signal::slice`] to
     /// avoid ambiguity. This is not an expression language or a dynamic index.
+    /// Use [`Self::resolve_signal`] to retain the selected declaration and explicit slice.
     ///
     /// Returns [`LookupError`] for invalid syntax, missing or ambiguous metadata,
     /// a declaration without a history, or an invalid slice.
     pub fn signal(&self, selector: &str) -> std::result::Result<Signal, LookupError> {
+        self.resolve_signal(selector, None)
+            .map(|resolved| resolved.signal())
+    }
+
+    /// Resolves a selector and retains its declaration and explicit bit slice.
+    ///
+    /// Uses the exact-first rules of [`Self::signal`]. Exact ambiguous declarations
+    /// and declarations without a signal return errors without trying a slice.
+    /// Full-width slices retain their bounds in [`ResolvedSelector::projection`].
+    ///
+    /// `scope` is a root-based component prefix, not a scope identity. An empty
+    /// prefix or `None` selects from the root. A candidate that starts with the
+    /// prefix and has at least one further component is already qualified.
+    /// Otherwise, the prefix is added once. This applies to both the exact path
+    /// and the slice base, without changing quoted or escaped names. An empty
+    /// candidate or slice base is not prefixed and returns [`LookupError::NotFound`]
+    /// with an empty path. There is no search in other scopes and no separate scope lookup;
+    /// duplicate scope paths need not make the final declaration ambiguous.
+    ///
+    /// Returns the same [`LookupError`] categories as [`Self::signal`]. Syntax
+    /// error offsets refer to the supplied selector, before qualification.
+    /// Lookup error paths identify the attempted qualified path, or the qualified
+    /// base without bounds when a slice was attempted.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let source = b"$scope module top $end $var wire 1 ! flag $end \
+    ///     $upscope $end $enddefinitions $end #0 1!";
+    /// let mut wave = ondas::open_bytes("tree.vcd", source.as_slice().into())?;
+    /// let h = wave.hierarchy().clone();
+    /// let scope = ondas::HierarchyPath::parse("top")?;
+    /// let whole = h.resolve_signal("flag", Some(&scope))?;
+    /// let full = h.resolve_signal(r#""flag"[0:0]"#, Some(&scope))?;
+    /// assert_eq!(whole.signal(), full.signal());
+    /// assert_eq!(whole.projection(), None);
+    /// assert_eq!(full.projection(), Some((0, 0)));
+    /// assert_eq!(full.declaration().path().to_string(), "top.flag");
+    /// let sample = wave.sample(full.signal(), ondas::Time::ZERO)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn resolve_signal(
+        &self,
+        selector: &str,
+        scope: Option<&HierarchyPath>,
+    ) -> std::result::Result<ResolvedSelector<'_>, LookupError> {
+        let resolve = |mut path: HierarchyPath, projection: Option<(u32, u32)>| {
+            if let Some(scope) = scope.filter(|scope| !scope.is_empty())
+                && !path.is_empty()
+                && !(path.len() > scope.len() && path.components.starts_with(&scope.components))
+            {
+                path = HierarchyPath::from_components(scope.components().chain(path.components()));
+            }
+            let declaration = self.variable_path(&path)?;
+            let signal = declaration
+                .signal()
+                .ok_or_else(|| LookupError::NoSignal { path: path.clone() })?;
+            let signal = match projection {
+                Some((msb, lsb)) => signal.slice(msb, lsb)?,
+                None => signal,
+            };
+            Ok(ResolvedSelector {
+                declaration,
+                signal,
+                projection,
+            })
+        };
         let exact = HierarchyPath::parse(selector)
             .map_err(LookupError::from)
-            .and_then(|path| self.signal_path(&path));
+            .and_then(|path| resolve(path, None));
         if !matches!(
             &exact,
             Err(LookupError::NotFound { .. } | LookupError::InvalidPath(_))
@@ -648,7 +755,7 @@ impl Hierarchy {
             return exact;
         }
         if let Some((path, msb, lsb)) = path::selector(selector)? {
-            return Ok(self.signal_path(&path)?.slice(msb, lsb)?);
+            return resolve(path, Some((msb, lsb)));
         }
         exact
     }

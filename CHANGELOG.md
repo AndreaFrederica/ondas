@@ -4,6 +4,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Added
+
+- `Hierarchy::resolve_signal` and `ResolvedSelector` to retain the selected declaration, query handle and explicit normalized slice bounds, including full-width slices. Resolution accepts an optional scope prefix.
+
 ## [2.1.0] - 2026-11-10
 
 ### Added
