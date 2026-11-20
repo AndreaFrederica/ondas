@@ -9,6 +9,7 @@
 #include <cxxabi.h>
 #include <dlfcn.h>
 #include <exception>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <memory>
@@ -38,22 +39,20 @@ constexpr size_t maximum_storage = 16 * 1024 * 1024;
 struct Unsupported : std::runtime_error { using std::runtime_error::runtime_error; };
 struct LayoutUnsupported : Unsupported { using Unsupported::Unsupported; };
 
+bool bit_index = false;
+void* wdb_reader = nullptr;
+void* wdb_kernel = nullptr;
+void* wdb_symbol(const char* name) {
+    auto found = dlsym(wdb_reader, name);
+    return found ? found : dlsym(wdb_kernel, name);
+}
 template<class T> T symbol(const std::string& name) {
-    auto address = dlsym(RTLD_DEFAULT, name.c_str());
+    auto address = wdb_symbol(name.c_str());
     if (!address) throw Unsupported("reader is missing ABI symbol " + name);
     return reinterpret_cast<T>(address);
 }
-// Optional symbols keep the serial path when the selected reader does not provide them.
 template<class T> T optional_symbol(const char* name) {
-    return reinterpret_cast<T>(dlsym(RTLD_DEFAULT, name));
-}
-void selected_library(const char* name, const char* expected) {
-    Dl_info info{};
-    if (!dladdr(symbol<const void*>(name), &info) || !info.dli_fname)
-        throw Unsupported("cannot identify loaded reader library");
-    std::unique_ptr<char, decltype(&free)> actual(realpath(info.dli_fname, nullptr), &free);
-    if (!actual || std::strcmp(actual.get(), expected))
-        throw Unsupported("loaded reader library differs from the build-time selection");
+    return reinterpret_cast<T>(wdb_symbol(name));
 }
 const void* pointer(const void* object, size_t offset) {
     if (!object) throw std::runtime_error("null native owner");
@@ -144,7 +143,7 @@ struct TimeByteValues { int64_t tick = 0; std::vector<ByteValue> bytes; };
 static_assert(sizeof(ByteValue) == 8 && sizeof(TimeByteValue) == 16 && sizeof(TimeByteValues) == 32);
 // The older reader can lose same-tick updates in byte indexes. Its bit indexes
 // retain those updates and still describe physical storage for the same decoder.
-constexpr size_t indexes_per_byte = ONDAS_WDB_BIT_INDEX ? 8 : 1;
+size_t indexes_per_byte() { return bit_index ? 8 : 1; }
 struct AddressBitPair { long long address; unsigned bit; };
 static_assert(sizeof(AddressBitPair) == 16);
 // Index identity and deletion entry points. Resolving them allocates nothing per call and, once
@@ -158,11 +157,11 @@ struct HistoryAbi {
 HistoryAbi& history_abi() {
     static HistoryAbi abi{
         symbol<long long(*)(const void*)>("_ZNK9SimBridge14WdbScalarBTree10getAddressEv"),
-        ONDAS_WDB_BIT_INDEX ? symbol<unsigned(*)(const void*)>(
+        bit_index ? symbol<unsigned(*)(const void*)>(
             "_ZNK9SimBridge14WdbScalarBTree14getBitPositionEv") : nullptr,
         symbol<void(*)(void*, long long, long long)>(
             "_ZN9SimBridge22WdbAddressBTreeManager16deleteByteBTreesExx"),
-        ONDAS_WDB_BIT_INDEX ? symbol<void(*)(void*, const std::vector<AddressBitPair>&)>(
+        bit_index ? symbol<void(*)(void*, const std::vector<AddressBitPair>&)>(
             "_ZN9SimBridge22WdbAddressBTreeManager15deleteBitBTreesERKSt6vectorINS_17WdbAddressBitPairESaIS2_EE") : nullptr,
     };
     return abi;
@@ -192,7 +191,7 @@ size_t available_workers() {
 // joined, so the batch rollback removes every created tree and nothing retries over partial
 // indexes.
 bool parallel_scan(const void* database, const std::vector<void*>& trees) {
-    if constexpr (ONDAS_WDB_BIT_INDEX) return false;
+    if (bit_index) return false;
     if (!database || trees.size() < 4096) return false;
     static auto splitter = optional_symbol<EventSplitter>(
         "_ZNK9SimBridge30WdbMultipleBucketEventDatabase29getEventBlockDatabaseIteratorERKSt6vectorIPNS_14WdbScalarBTreeESaIS3_EERS1_ISt10shared_ptrINS_22WdbIEventBlockIteratorEESaISA_EERS1_IS5_SaIS5_EE");
@@ -300,9 +299,9 @@ struct HistoryCleanup {
     HistoryAbi& abi;
     std::vector<AddressBitPair> scratch;
     explicit HistoryCleanup(void* source)
-        : manager(source), abi(history_abi()), scratch(ONDAS_WDB_BIT_INDEX ? 1 : 0) {}
+        : manager(source), abi(history_abi()), scratch(bit_index ? 1 : 0) {}
     void operator()(const void* tree) {
-        if constexpr (ONDAS_WDB_BIT_INDEX) {
+        if (bit_index) {
             scratch[0] = {abi.address(tree), abi.bit(tree)};
             abi.remove_bits(manager, scratch);
         } else {
@@ -337,11 +336,11 @@ struct IndexBatch {
         }
     }
     void add(long long address, unsigned length, std::vector<void*>& trees) {
-        if constexpr (ONDAS_WDB_BIT_INDEX) {
+        if (bit_index) {
             static auto create = symbol<void(*)(void*, const std::vector<AddressBitPair>&, std::vector<void*>&, std::vector<void*>&)>(
                 "_ZN9SimBridge22WdbAddressBTreeManager20getOrCreateBitBTreesERKSt6vectorINS_17WdbAddressBitPairESaIS2_EERS1_IPNS_14WdbScalarBTreeESaIS8_EESB_");
             std::vector<AddressBitPair> pairs;
-            pairs.reserve(size_t(length) * indexes_per_byte);
+            pairs.reserve(size_t(length) * indexes_per_byte());
             for (unsigned byte = 0; byte < length; ++byte)
                 for (unsigned bit = 0; bit < 8; ++bit) pairs.push_back({address + byte, bit});
             create(cleanup.manager, pairs, trees, created);
@@ -350,9 +349,9 @@ struct IndexBatch {
                 "_ZN9SimBridge22WdbAddressBTreeManager21getOrCreateByteBTreesExxRSt6vectorIPNS_14WdbScalarBTreeESaIS3_EES6_");
             create(cleanup.manager, address, length, trees, created);
         }
-        if (trees.size() != size_t(length) * indexes_per_byte)
+        if (trees.size() != size_t(length) * indexes_per_byte())
             throw std::runtime_error("native index width disagrees with extent");
-        if constexpr (ONDAS_WDB_BIT_INDEX) {
+        if (bit_index) {
             for (size_t i = 0; i < trees.size(); ++i)
                 if (cleanup.abi.address(trees[i]) != address + static_cast<long long>(i / 8) || cleanup.abi.bit(trees[i]) != i % 8)
                     throw std::runtime_error("native bit index order disagrees with extent");
@@ -501,9 +500,9 @@ struct Reader {
         bool complete = true;
         for (size_t i = 0; i < state.bytes.size(); ++i) {
             const auto byte = state.bytes[i];
-            const auto offset = i / indexes_per_byte;
-            const unsigned mask = ONDAS_WDB_BIT_INDEX ? 1u << (i % 8) : 0xff;
-            if constexpr (ONDAS_WDB_BIT_INDEX) {
+            const auto offset = i / indexes_per_byte();
+            const unsigned mask = bit_index ? 1u << (i % 8) : 0xff;
+            if (bit_index) {
                 if (byte.kind == 1) {
                     if (byte.value > 1) throw std::runtime_error("native bit index returned a non-bit value");
                     if (byte.value) bytes[offset] |= mask;
@@ -540,7 +539,7 @@ struct Reader {
             return;
         }
         if (d.encoding != 1) throw Unsupported("selected native value layout is not qualified");
-        if constexpr (!ONDAS_WDB_BIT_INDEX) {
+        if (!bit_index) {
             if (d.two_plane) { decode_two_plane(d, bytes, output); return; }
         }
         if (d.ordinal_enum || d.integer) {
@@ -853,15 +852,43 @@ void describe(Reader& reader, Declaration& declaration) {
     }
 }
 
-// Runtime guards shared by a native open and an idle-owner hit: the selected data
-// directory and the loaded reader library must still be the build-time selection.
+// The selected installation and its global SDK state stay loaded for the process lifetime.
 void validate_runtime() {
-    auto data = getenv("RDI_DATADIR");
-    std::unique_ptr<char, decltype(&free)> resolved(data ? realpath(data, nullptr) : nullptr, &free);
-    if (!resolved || std::strcmp(resolved.get(), ONDAS_WDB_DATA))
-        throw Unsupported("RDI_DATADIR must select the build-time reader data directory");
-    selected_library("_ZN9SimBridge10DataReader13getDataObjMgrEv", ONDAS_WDB_READER);
-    selected_library("_ZNK9SimBridge15WdbCommonReader13getValueEventExRKSt6vectorIPNS_14WdbScalarBTreeESaIS3_EERNS_17WdbTimeByteValuesE", ONDAS_WDB_KERNEL);
+    static const auto home = [] {
+        const char* configured = getenv("XILINX_VIVADO");
+        if (!configured) throw Unsupported("set XILINX_VIVADO to open WDB");
+        const auto home = std::filesystem::canonical(configured);
+        const auto lib = home / "lib/lnx64.o";
+        const char* data = getenv("RDI_DATADIR");
+        if (!data || std::filesystem::canonical(data) != home / "data")
+            throw Unsupported("set RDI_DATADIR to the selected Vivado data directory");
+        for (const auto* family : {"xv", "rdi"}) {
+            const auto reader = lib / (std::string("lib") + family + "_wavedata.so");
+            const auto kernel = lib / (std::string("lib") + family + "_simbridge_kernel.so");
+            if (!std::filesystem::is_regular_file(reader) || !std::filesystem::is_regular_file(kernel))
+                continue;
+            auto* candidate = dlopen(reader.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (!candidate) throw Unsupported(std::string("cannot load Vivado reader: ") + dlerror());
+            auto* companion = dlopen(kernel.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+            const auto anchor = "_ZNK9SimBridge15WdbCommonReader13getValueEventExRKSt6vectorIPNS_14WdbScalarBTreeESaIS3_EERNS_17WdbTimeByteValuesE";
+            if (!companion || !dlsym(companion, anchor) ||
+                !dlsym(candidate, "_ZN9SimBridge10DataReader13getDataObjMgrEv")) {
+                if (companion) dlclose(companion);
+                dlclose(candidate);
+                throw Unsupported("Vivado reader kernel or ABI is incompatible");
+            }
+            wdb_reader = candidate;
+            wdb_kernel = companion;
+            bit_index = std::strcmp(family, "rdi") == 0;
+            return home;
+        }
+        throw Unsupported("Vivado reader and kernel pair is missing");
+    }();
+    const char* current = getenv("XILINX_VIVADO");
+    const char* data = getenv("RDI_DATADIR");
+    if (!current || !data || std::filesystem::canonical(current) != home ||
+        std::filesystem::canonical(data) != home / "data")
+        throw Unsupported("changing the Vivado installation requires a new reader process");
 }
 // Drops traversal state before deleting the history indexes that its cursors can reference.
 void release_histories(Reader& reader) {
@@ -1202,7 +1229,7 @@ extern "C" int ondas_wdb_sample_bits(void* opaque, uint64_t id, uint64_t time, u
         const auto first = d.width - lsb - width;
         value.assign(decoded.begin() + first, decoded.begin() + first + width);
         bool walked = false;
-        if constexpr (!ONDAS_WDB_BIT_INDEX) {
+        if (!bit_index) {
             if (d.two_plane && width < d.width)
                 walked = reader.projection_changed_at(selected, lsb, width, at, changed);
         }
@@ -1240,12 +1267,12 @@ extern "C" int ondas_wdb_next(void* opaque, ondas_wdb_record* out, char* error, 
                     for (auto [index, offset] : cursor.targets) {
                         auto& selected = t.selected[index];
                         auto byte = cursor.current.byte.value;
-                        const unsigned mask = ONDAS_WDB_BIT_INDEX ? 1u << (offset % 8) : 0xff;
-                        if constexpr (ONDAS_WDB_BIT_INDEX) {
+                        const unsigned mask = bit_index ? 1u << (offset % 8) : 0xff;
+                        if (bit_index) {
                             if (byte > 1) throw std::runtime_error("native bit iterator returned a non-bit value");
                             byte = byte ? mask : 0;
                         }
-                        offset /= indexes_per_byte;
+                        offset /= indexes_per_byte();
                         auto value = (selected.bytes[offset] & ~mask) | byte;
                         selected.dirty |= selected.known[offset] != 0xff || selected.bytes[offset] != value;
                         selected.bytes[offset] = value;
@@ -1277,3 +1304,43 @@ extern "C" int ondas_wdb_next(void* opaque, ondas_wdb_record* out, char* error, 
     });
 }
 extern "C" void ondas_wdb_end(void* opaque) { static_cast<Reader*>(opaque)->traversal.reset(); }
+
+namespace SimBridge {
+DataReader::DataReader(WdbOpenMode mode, bool flag, const std::string& first,
+                       const std::string& second, const std::vector<std::string>& files, int option) {
+    symbol<void(*)(DataReader*, WdbOpenMode, bool, const std::string&, const std::string&,
+                    const std::vector<std::string>&, int)>(
+        "_ZN9SimBridge10DataReaderC1ENS_11WdbOpenModeEbRKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEES9_RKSt6vectorIS7_SaIS7_EEi")(
+        this, mode, flag, first, second, files, option);
+}
+DataReader::~DataReader() {
+    symbol<void(*)(DataReader*)>("_ZN9SimBridge10DataReaderD1Ev")(this);
+}
+void* DataReader::getDataObjMgr() {
+    return symbol<void*(*)(DataReader*)>("_ZN9SimBridge10DataReader13getDataObjMgrEv")(this);
+}
+int DataReader::getPrecision() const {
+    return symbol<int(*)(const DataReader*)>("_ZNK9SimBridge10DataReader12getPrecisionEv")(this);
+}
+long long DataReader::getLatestTime() const {
+    return symbol<long long(*)(const DataReader*)>("_ZNK9SimBridge10DataReader13getLatestTimeEv")(this);
+}
+const IObject* DataReader::getRootObject() const {
+    return symbol<const IObject*(*)(const DataReader*)>("_ZNK9SimBridge10DataReader13getRootObjectEv")(this);
+}
+void DataReader::traverseAllObjects(const std::function<IReader::TraverseCommand(const IObject*)>& callback,
+                                   bool flag, const IBlock* scope) const {
+    symbol<void(*)(const DataReader*, const std::function<IReader::TraverseCommand(const IObject*)>&,
+                   bool, const IBlock*)>(
+        "_ZNK9SimBridge10DataReader18traverseAllObjectsERKSt8functionIFNS_7IReader15TraverseCommandEPKNS_7IObjectEEEbPKNS_6IBlockE")(
+        this, callback, flag, scope);
+}
+void DataConversion::formatRawMemory(const BitIndex<const unsigned char*>& index, const IType* type,
+                                     const RTTI::FullConstraints* constraints, const ValueFormat& format,
+                                     bool flag, Value& result) const {
+    symbol<void(*)(const DataConversion*, const BitIndex<const unsigned char*>&, const IType*,
+                   const RTTI::FullConstraints*, const ValueFormat&, bool, Value&)>(
+        "_ZNK9SimBridge14DataConversion15formatRawMemoryERKNS_8BitIndexIPKhEEPKNS_5ITypeEPKN4RTTI15FullConstraintsERKNS_11ValueFormatEbRNS_5ValueE")(
+        this, index, type, constraints, format, flag, result);
+}
+}

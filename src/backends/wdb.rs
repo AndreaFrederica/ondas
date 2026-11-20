@@ -328,6 +328,28 @@ fn validate_runtime() -> Result<()> {
     let code = unsafe { ondas_wdb_validate_runtime(error.as_mut_ptr(), error.len()) };
     status(code, &error, "open")
 }
+#[path = "../../tools/repo/wdb_runtime_version.rs"]
+mod wdb_runtime_version;
+
+fn runtime_dbg_version() -> u16 {
+    static VERSION: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let Some(home) = std::env::var_os("XILINX_VIVADO") else {
+            return 0;
+        };
+        let lib = std::path::PathBuf::from(home).join("lib/lnx64.o");
+        ["xv", "rdi"]
+            .into_iter()
+            .find_map(|family| {
+                let reader = lib.join(format!("lib{family}_wavedata.so"));
+                reader
+                    .is_file()
+                    .then(|| wdb_runtime_version::reader_dbg_version(&reader).unwrap_or(0))
+            })
+            .unwrap_or(0)
+    })
+}
+
 fn native_open(
     path: &CString,
     metadata_only: bool,
@@ -356,7 +378,7 @@ fn native_open(
         if let Err(error) = status(code, &error, operation) {
             // Diagnose only a failed SDK open, as with FSDB. Unknown framing or
             // reader capability must preserve the original failure.
-            let reader_version = env!("ONDAS_WDB_DBG_VERSION").parse::<u16>().unwrap();
+            let reader_version = runtime_dbg_version();
             if code == -1
                 && reader_version != 0
                 && let Ok(Some(version)) = dbg_version(file, length)

@@ -1,10 +1,13 @@
 # SHM recording selection and SST2 ownership
 
-`native/shm.cpp`, `src/backends/shm.rs` and `tools/repo/shm_build.rs` define the reconstructed reader interface. Export discovery alone does not qualify it. Check the selected runtime with recorded inputs. Alias identity is optional. Separate handles can therefore describe the same source history.
+`native/shm.cpp`, `src/backends/shm.rs` define the reconstructed reader interface. Export discovery alone does not qualify it. Check the selected runtime with recorded inputs. Alias identity is optional. Separate handles can therefore describe the same source history.
 
 ## Runtime lookup can change the C++ runtime
 
-SHM supports readers with and without the libsst2.so SONAME. A library without SONAME keeps its canonical absolute path in downstream dependencies. A SONAME library needs explicit runtime lookup. It must resolve to the selected build-time reader. Use a directory with only a symlink to that reader. The full vendor library directory can load an older bundled C++ runtime. Rebuild the application if you move the SDK. Missing native libraries can prevent startup before Rust selects an input format.
+The shim loads the first selected reader on demand using `ONDAS_SST2_LIBRARY`
+or `XCELIUM_HOME/tools/lib/64bit/libsst2.so`. Both SONAME variants work.
+Configure any dependencies of that library through the system loader. The
+shim checks required exports and uses alias metadata when the reader exports it.
 
 ## A database directory is one recording selection
 

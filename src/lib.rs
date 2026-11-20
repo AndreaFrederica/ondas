@@ -29,13 +29,9 @@ parser for untrusted files.
 
 ### SHM setup
 
-Enable `shm-lib` and set `XCELIUM_HOME` to the selected Xcelium installation when
-building on Linux x86_64 GNU. Building requires a C++17 compiler, binutils and
-zlib development files. The selected library must remain at its build-time path.
-Use a compatible reader from Xcelium (2021+).
-Readers with an ELF `SONAME` also require explicit runtime lookup, for example
-through `LD_LIBRARY_PATH`. Use a directory with a symlink to the selected
-`libsst2.so` to avoid selecting an older bundled C++ runtime.
+Enable `shm-lib` on Linux x86_64 GNU with a C++17 compiler. At runtime set
+`XCELIUM_HOME` to Xcelium (2021+) or set `ONDAS_SST2_LIBRARY` to the absolute
+path of its `libsst2.so`. The reader is loaded on the first SHM open.
 
 SHM input is a complete database directory. Byte input is unsupported. The
 adapter reads the latest matching recording across its TRN components.
@@ -65,13 +61,11 @@ let sample = wave.sample(signal, ondas::Time::from_ticks(10))?;
 
 ### WDB setup
 
-Enable `wdb-lib` and set `XILINX_VIVADO` to the selected installation when building
-on Linux x86_64 GNU. Building requires a C++17 compiler and binutils. At runtime,
-set `RDI_DATADIR` to that installation's `data` directory and make its
-`lib/lnx64.o` libraries and their dependencies available to the dynamic loader.
-The application must use a compatible system C++ runtime. The build selects the
-installed `rdi` or `xv` reader libraries without a separate setting. A confirmed
-newer embedded DBG format returns [`Error::UnsupportedFeature`].
+Enable `wdb-lib` on Linux x86_64 GNU with a C++17 compiler. Set
+`XILINX_VIVADO` and `RDI_DATADIR` to the installation and its `data`
+directory at runtime. Make the installation's reader dependencies in
+`lib/lnx64.o` available to the dynamic loader. The adapter loads a matching
+`rdi` or `xv` reader and kernel pair on the first WDB open.
 
 First access to selected stored bytes builds their SDK history indexes, including
 times after the query end. Every waveform drop releases those indexes. A native owner
@@ -95,9 +89,7 @@ planes instead of the vendor formatter. A slice of one such array compares only 
 depends on when the whole extent is recorded from tick zero; other layouts keep the previous paths.
 
 The adapter uses a private reader ABI. Build-time symbol checks do not qualify
-other reader layouts. Keep the source file unchanged and available. The reader
-libraries must remain at their build-time paths. A different loaded installation
-is rejected before opening a native session. The reader provides bits, binary64
+other reader layouts. Keep the source file unchanged and available. Keep the selected runtime libraries accessible for the life of the reader process. The reader provides bits, binary64
 real values, native enum tables and static one-dimensional VHDL CHARACTER arrays
 as strings. Strings preserve ASCII NUL; non-ASCII contents return
 [`Error::NonAsciiString`]. Dynamic SystemVerilog String and named Event values

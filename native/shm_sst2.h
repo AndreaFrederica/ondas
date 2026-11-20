@@ -20,9 +20,7 @@ int da_get_int(int, SstHandle, int *);
 int da_get_real(int, SstHandle, double *);
 const char *da_get_sstr(int, SstHandle);
 const char *da_get_sstr_pl(int, SstHandle, ...);
-#ifdef ONDAS_SHM_USE_ALIAS_IDENTITY
 SstHandle da_get_xref(int, SstHandle);
-#endif
 int da_get_xvalseq(int, SstHandle, SstTime *);
 SstHandle da_handle(int, SstHandle);
 SstHandle da_handle_pl(int, SstHandle, ...);

@@ -650,7 +650,15 @@ fn metadata(wave: &Waveform, expected: &Json, bytes: bool, fixture: &Fixture) {
 fn has_alias_identity(wave: &Waveform) -> bool {
     #[cfg(feature = "shm-lib")]
     if wave.backend() == "shm-lib" {
-        return env!("ONDAS_SHM_ALIAS_PATH") == "shared";
+        static HAS_ALIAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        return *HAS_ALIAS.get_or_init(|| {
+            let explicit = std::env::var_os("ONDAS_SST2_LIBRARY").map(std::path::PathBuf::from);
+            let path = explicit.or_else(|| std::env::var_os("XCELIUM_HOME")
+                .map(|home| std::path::PathBuf::from(home).join("tools/lib/64bit/libsst2.so")));
+            path.and_then(|path| std::process::Command::new("nm").args(["-D", "--defined-only"])
+                .arg(path).output().ok()).is_some_and(|output| String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace().any(|word| word == "da_get_xref"))
+        });
     }
     let _ = wave;
     true
@@ -3158,11 +3166,6 @@ fn oracle_comparison_rules() {
 #[test]
 #[ignore = "requires Xcelium and installed fixtures; run just conformance-shm"]
 fn full_shm_pool() {
-    println!(
-        "SHM reader: {}; aliases: {}",
-        env!("ONDAS_SHM_READER"),
-        env!("ONDAS_SHM_ALIAS_PATH")
-    );
     full_pool("shm");
 }
 

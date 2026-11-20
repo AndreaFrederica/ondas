@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <dlfcn.h>
 #include <filesystem>
 #include <memory>
 #include <limits>
@@ -15,6 +17,62 @@
 
 namespace {
 struct Unavailable : std::runtime_error { using std::runtime_error::runtime_error; };
+#ifndef ONDAS_SHM_TEST_ACCOUNT
+#define ONDAS_SST2_REQUIRED(X) \
+    X(drOpenFile) \
+    X(drClose) \
+    X(da_get) \
+    X(da_get_int) \
+    X(da_get_real) \
+    X(da_get_sstr) \
+    X(da_get_sstr_pl) \
+    X(da_get_xvalseq) \
+    X(da_handle) \
+    X(da_handle_pl) \
+    X(da_iterate) \
+    X(da_scan) \
+    X(da_delete)
+#define DECLARE(name) decltype(&::name) name = nullptr;
+ONDAS_SST2_REQUIRED(DECLARE)
+#undef DECLARE
+decltype(&::da_get_xref) da_get_xref = nullptr;
+
+void initialize_reader() {
+    static const bool initialized = [] {
+        const char *explicit_library = std::getenv("ONDAS_SST2_LIBRARY");
+        const char *home = std::getenv("XCELIUM_HOME");
+        if (!explicit_library && !home)
+            throw Unavailable("set ONDAS_SST2_LIBRARY or XCELIUM_HOME to open SHM");
+        const auto library_path = explicit_library ? std::filesystem::path(explicit_library)
+            : std::filesystem::path(home) / "tools/lib/64bit/libsst2.so";
+        void *handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!handle) throw Unavailable(std::string("cannot load libsst2: ") + dlerror());
+        try {
+#define RESOLVE(name) name = reinterpret_cast<decltype(name)>(dlsym(handle, #name)); \
+            if (!name) throw Unavailable("libsst2 missing " #name);
+            ONDAS_SST2_REQUIRED(RESOLVE)
+#undef RESOLVE
+            auto init = reinterpret_cast<int (*)()>(dlsym(handle, "_Z8sst2Initv"));
+            if (!init) init = reinterpret_cast<int (*)()>(dlsym(handle, "sst2Init"));
+            if (!init || init() != 1) throw Unavailable("libsst2 initialization failed");
+            da_get_xref = reinterpret_cast<decltype(da_get_xref)>(dlsym(handle, "da_get_xref"));
+        } catch (...) {
+            dlclose(handle);
+            throw;
+        }
+        // SDK handles and its process-global initialization share this lifetime.
+        return true;
+    }();
+    (void)initialized;
+}
+#undef ONDAS_SST2_REQUIRED
+#else
+void initialize_reader() {
+    static const bool initialized = sst2Init() == 1;
+    if (!initialized) throw Unavailable("sst2Init failed");
+}
+#endif
+
 void require(bool ok, const char *message) { if (!ok) throw std::runtime_error(message); }
 void report(char *out, size_t cap, const char *message) noexcept {
     if (cap) std::snprintf(out, cap, "%s", message);
@@ -63,8 +121,7 @@ struct Session {
     SstHandle handle = 0;
     explicit Session(const std::string &path) {
         suspend_active();
-        static const bool initialized = sst2Init() == 1;
-        if (!initialized) throw Unavailable("sst2Init failed");
+        initialize_reader();
         try {
             std::string stem;
             for (const auto &entry : std::filesystem::directory_iterator(path)) {
@@ -242,18 +299,19 @@ void import_variable(SstHandle variable, const std::string &prefix, std::vector<
     import_enumeration(declaration);
     declaration.source = source;
     auto &d = declaration.descriptor;
-#ifdef ONDAS_SHM_USE_ALIAS_IDENTITY
-    SstHandle key = da_get_xref(0x13d, variable);
-    require(key != 0, "missing SHM history identity");
-    auto identity = identities.emplace(key, out.size());
-    d.id = identity.first->second;
-    if (!identity.second) {
-        const auto &other = out[d.id].descriptor;
-        require(other.encoding == d.encoding && other.width == d.width, "incompatible SHM alias declaration");
+    d.id = out.size();
+#if !defined(ONDAS_SHM_TEST_ACCOUNT) || defined(ONDAS_SHM_USE_ALIAS_IDENTITY)
+    if (da_get_xref) {
+        SstHandle key = da_get_xref(0x13d, variable);
+        require(key != 0, "missing SHM history identity");
+        auto identity = identities.emplace(key, out.size());
+        d.id = identity.first->second;
+        if (!identity.second) {
+            const auto &other = out[d.id].descriptor;
+            require(other.encoding == d.encoding && other.width == d.width, "incompatible SHM alias declaration");
+        }
     }
 #else
-    // Without reader identity metadata, each declaration has its own history.
-    d.id = out.size();
     (void)identities;
 #endif
     std::string child_prefix = declaration.name;

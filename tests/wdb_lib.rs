@@ -929,7 +929,13 @@ fn wdb_compatible_recording_preserves_query_lifecycle() {
 #[test]
 #[ignore = "requires the selected reader and installed WDB version fixtures"]
 fn wdb_newer_dbg_is_distinct_from_a_generic_open_failure() {
-    let reader: u16 = env!("ONDAS_WDB_DBG_VERSION").parse().unwrap();
+    #[path = "../tools/repo/wdb_runtime_version.rs"]
+    mod wdb_runtime_version;
+    let library = std::path::PathBuf::from(std::env::var_os("XILINX_VIVADO").expect("set XILINX_VIVADO"))
+        .join("lib/lnx64.o");
+    let reader = ["xv", "rdi"].into_iter().find_map(|family| {
+        wdb_runtime_version::reader_dbg_version(&library.join(format!("lib{family}_wavedata.so")))
+    }).unwrap_or(0);
     assert_ne!(reader, 0, "selected reader has no identified DBG version");
     for (name, version) in [
         ("wdb/wdb0020-rs32i-testbench-behav", 5),
