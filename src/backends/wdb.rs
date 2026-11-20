@@ -91,6 +91,12 @@ unsafe extern "C" {
     fn ondas_wdb_decl_count(reader: *mut c_void) -> usize;
     fn ondas_wdb_scope_count(reader: *mut c_void) -> usize;
     fn ondas_wdb_declaration(reader: *mut c_void, index: usize, out: *mut Declaration) -> c_int;
+    fn ondas_wdb_source(
+        reader: *mut c_void,
+        index: usize,
+        callback: unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *const c_char, c_int),
+        context: *mut c_void,
+    ) -> c_int;
     fn ondas_wdb_enum_variant(
         reader: *mut c_void,
         declaration: usize,
@@ -753,6 +759,75 @@ impl Reader {
             hierarchy.reopened(),
             metadata,
         ))
+    }
+}
+
+impl Reader {
+    pub(crate) fn hdl_locations(&self) -> Result<Vec<crate::HdlLocation>> {
+        use crate::{HdlLocation, HdlPosition, HierarchyPath};
+        type Positions = (Option<HdlPosition>, Option<HdlPosition>);
+        unsafe extern "C" fn record(
+            context: *mut c_void,
+            file: *const c_char,
+            line: c_int,
+            instance: *const c_char,
+            occurrence: c_int,
+        ) {
+            unsafe fn position(file: *const c_char, line: c_int) -> Option<HdlPosition> {
+                if line <= 0 || file.is_null() {
+                    return None;
+                }
+                let file = unsafe { CStr::from_ptr(file) }.to_bytes();
+                (!file.is_empty()).then(|| HdlPosition {
+                    file: Path::new(std::ffi::OsStr::from_bytes(file)).to_owned(),
+                    line: line as u32,
+                })
+            }
+            unsafe {
+                *context.cast::<Positions>() =
+                    (position(file, line), position(instance, occurrence))
+            }
+        }
+        let raw = self.handle.as_ref().expect("open WDB").0.as_ptr();
+        let _guard = lock();
+        let count = unsafe { ondas_wdb_decl_count(raw) };
+        let mut paths: Vec<HierarchyPath> = Vec::with_capacity(count);
+        let mut locations = Vec::new();
+        for index in 0..count {
+            let mut declaration = Declaration::default();
+            if unsafe { ondas_wdb_declaration(raw, index, &mut declaration) } != 0 {
+                return Err(backend_error("invalid native declaration index"));
+            }
+            let name = unsafe { string(declaration.name) }?
+                .ok_or_else(|| backend_error("missing native name"))?;
+            let (name, _) = declaration_name(name, declaration.name_syntax, declaration.base_len)?;
+            let path = if declaration.parent == usize::MAX {
+                HierarchyPath::from_components([name])
+            } else if let Some(parent) = paths.get(declaration.parent) {
+                parent.join(name)
+            } else {
+                return Err(backend_error("native source hierarchy is out of order"));
+            };
+            paths.push(path.clone());
+            let mut positions: Positions = (None, None);
+            let result = unsafe {
+                ondas_wdb_source(
+                    raw,
+                    index,
+                    record,
+                    (&mut positions as *mut Positions).cast(),
+                )
+            };
+            if result == 0 {
+                locations.push(HdlLocation {
+                    path,
+                    scope: declaration.scope != 0,
+                    declaration: positions.0,
+                    instance: positions.1,
+                });
+            }
+        }
+        Ok(locations)
     }
 }
 

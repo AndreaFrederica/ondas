@@ -490,6 +490,22 @@ pub struct Waveform {
     compositions: composition::Compositions,
 }
 
+/// An HDL source position retained in a simulator database.
+#[derive(Debug, Clone)]
+pub struct HdlPosition {
+    pub file: std::path::PathBuf,
+    pub line: u32,
+}
+
+/// Optional source locations for one HDL declaration or scope.
+#[derive(Debug, Clone)]
+pub struct HdlLocation {
+    pub path: crate::HierarchyPath,
+    pub scope: bool,
+    pub declaration: Option<HdlPosition>,
+    pub instance: Option<HdlPosition>,
+}
+
 impl Waveform {
     /// Returns the detected source format.
     pub fn format(&self) -> Format {
@@ -545,6 +561,15 @@ impl Waveform {
     /// waveform queries. Handles from that clone still refer to this source.
     pub fn hierarchy(&self) -> &Hierarchy {
         &self.hierarchy
+    }
+
+    /// Returns recorded HDL locations when the selected waveform reader exposes them.
+    pub fn hdl_locations(&self) -> Result<Vec<HdlLocation>> {
+        match &self.reader {
+            #[cfg(feature = "wdb-lib")]
+            Reader::Wdb(reader) => reader.hdl_locations(),
+            _ => Ok(Vec::new()),
+        }
     }
 
     /// Prepares an ordered signal list for repeated queries.

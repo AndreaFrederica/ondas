@@ -1124,6 +1124,43 @@ extern "C" int ondas_wdb_declaration(void* opaque, size_t index, ondas_wdb_decl*
             d.type_name, nullptr, d.variants.size(), d.base_len};
     return 0;
 }
+extern "C" int ondas_wdb_source(void* opaque, size_t index, ondas_wdb_source_cb callback, void* context) {
+    auto& reader = *static_cast<Reader*>(opaque);
+    if (index >= reader.declarations.size()) return -1;
+    try {
+        using namespace SimBridge;
+        using ObjectFile = std::string(*)(const DataReader*, const IObject*);
+        using ObjectLine = int(*)(const DataReader*, const IObject*);
+        static const auto file = optional_symbol<ObjectFile>(
+            "_ZNK9SimBridge10DataReader25getObjectAbsoluteFileNameB5cxx11EPKNS_7IObjectE");
+        static const auto line = optional_symbol<ObjectLine>(
+            "_ZNK9SimBridge10DataReader15getObjectLineNoEPKNS_7IObjectE");
+        if (!file || !line) return 0;
+        auto& declaration = reader.declarations[index];
+        const auto definition = file(&reader.native, declaration.object);
+        const auto definition_line = line(&reader.native, declaration.object);
+        std::string instance;
+        int instance_line = 0;
+        if (declaration.scope) {
+            using InstanceFile = std::string(*)(const DataReader*, const IBlock*);
+            using InstanceLine = int(*)(const DataReader*, const IBlock*);
+            static const auto block_file = optional_symbol<InstanceFile>(
+                "_ZNK9SimBridge10DataReader28getBlockInstAbsoluteFileNameB5cxx11EPKNS_6IBlockE");
+            static const auto block_line = optional_symbol<InstanceLine>(
+                "_ZNK9SimBridge10DataReader18getBlockInstLineNoEPKNS_6IBlockE");
+            if (block_file && block_line) {
+                auto block = reinterpret_cast<const IBlock*>(declaration.object);
+                instance = block_file(&reader.native, block);
+                instance_line = block_line(&reader.native, block);
+            }
+        }
+        callback(context, definition.c_str(), definition_line, instance.c_str(), instance_line);
+        return 0;
+    } catch (...) {
+        // A reader can lack optional debug information for an individual object.
+        return -1;
+    }
+}
 extern "C" int ondas_wdb_enum_variant(void* opaque, size_t declaration, size_t variant, const char** bits, const char** label) {
     auto& declarations = static_cast<Reader*>(opaque)->declarations;
     if (declaration >= declarations.size() || variant >= declarations[declaration].variants.size()) return -1;

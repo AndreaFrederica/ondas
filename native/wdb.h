@@ -36,6 +36,8 @@ void ondas_wdb_metadata(void*, struct ondas_wdb_meta*);
 size_t ondas_wdb_decl_count(void*);
 size_t ondas_wdb_scope_count(void*);
 int ondas_wdb_declaration(void*, size_t, struct ondas_wdb_decl*);
+typedef void (*ondas_wdb_source_cb)(void*, const char*, int32_t, const char*, int32_t);
+int ondas_wdb_source(void*, size_t, ondas_wdb_source_cb, void*);
 int ondas_wdb_enum_variant(void*, size_t, size_t, const char**, const char**);
 int ondas_wdb_begin(void*, const uint64_t*, size_t, uint64_t, uint64_t, char*, size_t);
 int ondas_wdb_begin_points(void*, const uint64_t*, size_t, char*, size_t);
